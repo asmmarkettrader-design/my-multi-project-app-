@@ -6,6 +6,11 @@ on:
       - main
       - master
   workflow_dispatch:
+    inputs:
+      force_project_name:
+        description: 'اگر مینوئلی بلڈ کرنا ہے تو زپ فائل کا نام لکھیں (بغیر .zip کے)'
+        required: false
+        default: ''
 
 jobs:
   # سٹیپ 1: تبدیل شدہ یا نئی زپ فائلز کو ڈیٹیکٹ کرنا
@@ -17,19 +22,30 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
       with:
-        fetch-depth: 2
+        fetch-depth: 0 # تمام ہسٹری لے کر ائے گا تاکہ موازنہ خراب نہ ہو
 
     - name: Get Changed ZIP Files
       id: set-matrix
       run: |
-        # یہ کمانڈ projects/ فولڈر میں صرف تبدیل یا اپلوڈ ہونے والی .zip فائلز کے نام نکالتی ہے
-        CHANGED=$(git diff --name-only HEAD^ HEAD | grep '^projects/.*\.zip$' | cut -d/ -f2 | sed 's/\.zip$//' | sort -u | jq -R . | jq -s -c .)
-        if [ "$CHANGED" == "[]" ] || [ -z "$CHANGED" ]; then
-          echo "No new or updated ZIP projects detected."
-          echo "matrix=[]" >> $GITHUB_OUTPUT
+        # اگر صارف نے مینوئلی نام ٹائپ کیا ہے
+        if [ "${{ github.event.inputs.force_project_name }}" != "" ]; then
+          echo "Manual trigger for project: ${{ github.event.inputs.force_project_name }}"
+          echo "matrix=[\"${{ github.event.inputs.force_project_name }}\"]" >> $GITHUB_OUTPUT
         else
-          echo "Changed ZIP projects: $CHANGED"
-          echo "matrix=$CHANGED" >> $GITHUB_OUTPUT
+          # پش پر تبدیلیاں چیک کرنا (اگر پہلی کمٹ ہو تو یہ پوری ہسٹری چیک کرے گا)
+          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            CHANGED=$(git diff --name-only HEAD~1 HEAD | grep '^projects/.*\.zip$' | cut -d/ -f2 | sed 's/\.zip$//' | sort -u | jq -R . | jq -s -c .)
+          else
+            CHANGED=$(git ls-files projects/ | grep '\.zip$' | cut -d/ -f2 | sed 's/\.zip$//' | sort -u | jq -R . | jq -s -c .)
+          fi
+          
+          if [ "$CHANGED" == "[]" ] || [ -z "$CHANGED" ]; then
+            echo "No new or updated ZIP projects detected."
+            echo "matrix=[]" >> $GITHUB_OUTPUT
+          else
+            echo "Changed ZIP projects: $CHANGED"
+            echo "matrix=$CHANGED" >> $GITHUB_OUTPUT
+          fi
         fi
 
   # سٹیپ 2: ونڈوز (EXE) بلڈ جاب
@@ -46,12 +62,16 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    # زپ فائل کو عارضی فولڈر میں ایکسٹریکٹ (Unzip) کرنا
     - name: Unzip Project Files
       shell: powershell
       run: |
-        New-Item -ItemType Directory -Force -Path "projects/${{ matrix.project }}_extracted"
-        Expand-Archive -Path "projects/${{ matrix.project }}.zip" -DestinationPath "projects/${{ matrix.project }}_extracted" -Force
+        if (Test-Path "projects/${{ matrix.project }}.zip") {
+          New-Item -ItemType Directory -Force -Path "projects/${{ matrix.project }}_extracted"
+          Expand-Archive -Path "projects/${{ matrix.project }}.zip" -DestinationPath "projects/${{ matrix.project }}_extracted" -Force
+        } else {
+          Write-Error "ZIP file projects/${{ matrix.project }}.zip not found!"
+          exit 1
+        }
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -67,11 +87,16 @@ jobs:
           pip install -r "projects/${{ matrix.project }}_extracted/requirements.txt"
         }
 
-    # پروجیکٹ کے لیے ایگزیکیو فائل بنانا
     - name: Compile to EXE (Windows)
       shell: powershell
       run: |
-        pyinstaller --onefile --windowed --distpath "./projects/build_outputs/${{ matrix.project }}" "projects/${{ matrix.project }}_extracted/src/main.py"
+        # چیک کرنا کہ سورس فائل موجود ہے یا نہیں
+        if (Test-Path "projects/${{ matrix.project }}_extracted/src/main.py") {
+          pyinstaller --onefile --windowed --distpath "./projects/build_outputs/${{ matrix.project }}" "projects/${{ matrix.project }}_extracted/src/main.py"
+        } else {
+          # اگر زپ کے اندر ڈائریکٹ main.py پڑی ہو بغیر src کے
+          pyinstaller --onefile --windowed --distpath "./projects/build_outputs/${{ matrix.project }}" "projects/${{ matrix.project }}_extracted/main.py"
+        }
 
     - name: Upload EXE Artifact
       uses: actions/upload-artifact@v4
@@ -93,7 +118,6 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    # لینوکس پر زپ فائل کو ان زپ کرنا
     - name: Unzip Project Files
       run: |
         mkdir -p "projects/${{ matrix.project }}_extracted"
@@ -120,12 +144,10 @@ jobs:
       run: |
         cd "projects/${{ matrix.project }}_extracted"
         if [ ! -f buildozer.spec ]; then
-          echo "[INFO] Generating default buildozer config..."
           ~/.local/bin/buildozer init
         fi
         ~/.local/bin/buildozer -v android debug
         
-        # تیار شدہ APK کو آؤٹ پٹ فولڈر میں منتقل کرنا
         mkdir -p ../build_outputs/${{ matrix.project }}
         cp bin/*.apk ../build_outputs/${{ matrix.project }}/ 2>/dev/null || true
 
