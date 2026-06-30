@@ -1,0 +1,83 @@
+name: Compile Changed Projects
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  filter-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      project_alpha: ${{ steps.changes.outputs.project_alpha }}
+      project_beta: ${{ steps.changes.outputs.project_beta }}
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Detect Changes in Projects
+      uses: dorny/paths-filter@v3
+      id: changes
+      with:
+        filters: |
+          project_alpha:
+            - 'projects/project_alpha/**'
+          project_beta:
+            - 'projects/project_beta/**'
+
+  build-alpha:
+    needs: filter-changes
+    if: needs.filter-changes.outputs.project_alpha == 'true'
+    runs-on: windows-latest
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r projects/project_alpha/requirements.txt
+
+    - name: Build Executable for Alpha
+      run: |
+        pyinstaller --onefile --distpath ./projects/project_alpha/build_artifacts projects/project_alpha/src/main.py
+
+    - name: Upload Alpha Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: alpha-executable
+        path: ./projects/project_alpha/build_artifacts/
+
+  build-beta:
+    needs: filter-changes
+    if: needs.filter-changes.outputs.project_beta == 'true'
+    runs-on: windows-latest
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r projects/project_beta/requirements.txt
+
+    - name: Build Executable for Beta
+      run: |
+        pyinstaller --onefile --distpath ./projects/project_beta/build_artifacts projects/project_beta/src/main.py
+
+    - name: Upload Beta Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: beta-executable
+        path: ./projects/project_beta/build_artifacts/
