@@ -13,7 +13,6 @@ on:
         default: ''
 
 jobs:
-  # سٹیپ 1: پش یا مینوئل رن پر تمام .zip اور .rar فائلز کو ڈیٹیکٹ کرنا
   detect-archives:
     runs-on: ubuntu-latest
     outputs:
@@ -30,7 +29,6 @@ jobs:
         if [ "${{ github.event.inputs.force_project_name }}" != "" ]; then
           echo "matrix=[\"${{ github.event.inputs.force_project_name }}\"]" >> $GITHUB_OUTPUT
         else
-          # یہ کمانڈ .zip اور .rar دونوں کو اسکین کرتی ہے
           if git rev-parse HEAD~1 >/dev/null 2>&1; then
             CHANGED=$(git diff --name-only HEAD~1 HEAD | grep -E '^projects/.*\.(zip|rar)$' | cut -d/ -f2 | sed -E 's/\.(zip|rar)$//' | sort -u | jq -R . | jq -s -c .)
           else
@@ -44,7 +42,6 @@ jobs:
           fi
         fi
 
-  # سٹیپ 2: ونڈوز (EXE) بلڈ جاب - سپیشل گہری اسکیننگ کے ساتھ
   build-windows-exe:
     needs: detect-archives
     if: ${{ needs.detect-archives.outputs.changed_archives != '[]' && needs.detect-archives.outputs.changed_archives != '' }}
@@ -64,7 +61,6 @@ jobs:
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 
-    # زپ ہو یا رار، دونوں کو ایکسٹریکٹ کرنے کا جادوئی سٹیپ
     - name: Extract Archive (ZIP or RAR)
       shell: powershell
       run: |
@@ -76,11 +72,8 @@ jobs:
         $rarFile = "projects/$proj.rar"
         
         if (Test-Path $zipFile) {
-            Write-Host "Extracting ZIP file..."
             Expand-Archive -Path $zipFile -DestinationPath $extractPath -Force
         } elseif (Test-Path $rarFile) {
-            Write-Host "Extracting RAR file using WinRAR/Expand-Archive fallback..."
-            # ونڈوز رنر پر رار کھولنے کے لیے 7-Zip یا پاور شیل کامبینیشن کا استعمال
             & 7z x $rarFile "-o$extractPath" -y
         } else {
             Write-Error "No archive found for $proj"
@@ -90,7 +83,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: '3.10' # پرانی اور نئی دونوں لائبریریز کی مطابقت کے لیے پائتھون 3.10 پر شفٹ کیا ہے
 
     - name: Deep Scan & Install Dependencies
       shell: powershell
@@ -99,10 +92,11 @@ jobs:
         python -m pip install --upgrade pip
         pip install pyinstaller==6.9.0
         
-        # فولڈرز کے اندر فولڈرز میں گھس کر requirements.txt تلاش کرنا
         $reqs = Get-ChildItem -Path "projects/${proj}_extracted" -Filter "requirements.txt" -Recurse
         foreach ($req in $reqs) {
             Write-Host "Installing dependencies from found file: $($req.FullName)"
+            # اگر غلطی سے فرنٹ اینڈ پر غلط نام لکھا ہو تو اسے انسٹالیشن کے دوران ہینڈل کرنا
+            (Get-Content $req.FullName) -replace 'sqlite3-utils', 'sqlite-utils' | Set-Content $req.FullName
             pip install -r $req.FullName
         }
 
@@ -113,16 +107,12 @@ jobs:
         $extractPath = "projects/${proj}_extracted"
         $outPath = "./projects/build_outputs/$proj"
         
-        # گہرا اسکین: سب سے پہلے کہیں بھی پڑی ہوئی main.py ڈھونڈو
         $mainPy = Get-ChildItem -Path $extractPath -Filter "main.py" -Recurse | Select-Object -First 1
-        
-        # اگر main.py نہیں ہے، تو پورے فولڈرز کے جال میں سے سب سے پہلی پائتھون فائل اٹھا لو
         if (-not $mainPy) {
             $mainPy = Get-ChildItem -Path $extractPath -Filter "*.py" -Recurse | Select-Object -First 1
         }
         
         if ($mainPy) {
-            Write-Host "Target Python file found at: $($mainPy.FullName)"
             pyinstaller --onefile --windowed --distpath $outPath $mainPy.FullName
         } else {
             Write-Error "CRITICAL: No Python file found inside the archive structure!"
@@ -135,7 +125,6 @@ jobs:
         name: ${{ matrix.project }}-windows-exe
         path: ./projects/build_outputs/
 
-  # سٹیپ 3: اینڈرائیڈ (APK) بلڈ جاب - ایڈوانس لینوکس ان پیکر کے ساتھ
   build-android-apk:
     needs: detect-archives
     if: ${{ needs.detect-archives.outputs.changed_archives != '[]' && needs.detect-archives.outputs.changed_archives != '' }}
@@ -158,7 +147,6 @@ jobs:
       run: |
         PROJ="${{ matrix.project }}"
         mkdir -p "projects/${PROJ}_extracted"
-        
         if [ -f "projects/${PROJ}.zip" ]; then
           unzip -o "projects/${PROJ}.zip" -d "projects/${PROJ}_extracted"
         elif [ -f "projects/${PROJ}.rar" ]; then
@@ -174,17 +162,26 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: '3.10'
 
     - name: Install Android Build Dependencies
       run: |
         sudo apt-get install -y git zip openjdk-17-jdk python3-pip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev libsqlite3-dev tk-dev libgdbm-compat-dev liblzma-dev lzma
         pip3 install --user --upgrade buildozer Cython virtualenv
 
+    # جادوئی سٹیپ: بلڈوزر چلنے سے پہلے گوگل اینڈرائیڈ کے تمام لائسنس مینوئلی ایکسیپٹ کرنا
+    - name: Auto-Accept Android SDK Licenses
+      run: |
+        mkdir -p ~/.android
+        touch ~/.android/repositories.cfg
+        # بلڈوزر کی ڈیفالٹ لوکیشن بنا کر لائسنس فائلز پہلے سے انجیکٹ کرنا
+        mkdir -p /home/runner/.buildozer/android/platform/android-sdk/licenses
+        echo -e "\n89354db23afb50a819afa2e1ec4d1222733d9014\nd56f171340b0cf14ad45120c7210103861a8ef8d\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > /home/runner/.buildozer/android/platform/android-sdk/licenses/android-sdk-license
+        echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > /home/runner/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license
+
     - name: Deep Locate and Compile to APK
       run: |
         PROJ="${{ matrix.project }}"
-        # یہ کمانڈ اس اندرونی ترین فولڈر تک خود پہنچ جائے گی جہاں پایتھون فائلز موجود ہیں
         TARGET_DIR=$(find "projects/${PROJ}_extracted" -name "*.py" -print -quit | xargs dirname)
         
         if [ -z "$TARGET_DIR" ]; then
@@ -192,17 +189,15 @@ jobs:
           exit 1
         fi
         
-        echo "Navigating to deep target directory: $TARGET_DIR"
         cd "$TARGET_DIR"
         
-        # اگر وہاں بلڈوزر کی کنفیگ نہیں ہے تو بناؤ
         if [ ! -f buildozer.spec ]; then
           ~/.local/bin/buildozer init
         fi
         
-        ~/.local/bin/buildozer -v android debug
+        # لائسنس بائی پاس کے ساتھ اینڈرائیڈ بلڈ رن کرنا
+        yes | ~/.local/bin/buildozer -v android debug
         
-        # فائنل آؤٹ پٹ کو منتقل کرنا
         mkdir -p ../../build_outputs/"$PROJ"
         cp bin/*.apk ../../build_outputs/"$PROJ"/ 2>/dev/null || true
 
