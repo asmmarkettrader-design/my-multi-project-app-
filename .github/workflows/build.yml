@@ -95,34 +95,28 @@ jobs:
         
         $reqs = Get-ChildItem -Path "projects/${proj}_extracted" -Filter "requirements.txt" -Recurse
         foreach ($req in $reqs) {
-            Write-Host "Installing dependencies from found file: $($req.FullName)"
+            Write-Host "Installing dependencies from: $($req.FullName)"
             (Get-Content $req.FullName) -replace 'sqlite3-utils', 'sqlite-utils' | Set-Content $req.FullName
             pip install -r $req.FullName
         }
 
-    - name: Deep Scan & Compile to EXE (Strict Compile Folder Path)
+    - name: Deep Scan & Compile to EXE
       shell: powershell
       run: |
         $proj = "${{ matrix.project }}".Trim()
         $extractPath = "projects/${proj}_extracted"
         
-        # بالکل روٹ لیول پر ایک مستقل 'compile' فولڈر بنانا
-        $outPath = "$echo $env:GITHUB_WORKSPACE\compile"
-        if (-not (Test-Path $outPath)) {
-            New-Item -ItemType Directory -Force -Path $outPath
-        }
+        # 100% گارنٹی کے ساتھ 'compile' فولڈر بنانا
+        $outPath = Join-Path -Path $env:GITHUB_WORKSPACE -ChildPath "compile"
+        if (-not (Test-Path $outPath)) { New-Item -ItemType Directory -Force -Path $outPath }
         
         $mainPy = Get-ChildItem -Path $extractPath -Filter "main.py" -Recurse | Select-Object -First 1
-        if (-not $mainPy) {
-            $mainPy = Get-ChildItem -Path $extractPath -Filter "*.py" -Recurse | Select-Object -First 1
-        }
+        if (-not $mainPy) { $mainPy = Get-ChildItem -Path $extractPath -Filter "*.py" -Recurse | Select-Object -First 1 }
         
         if ($mainPy) {
-            Write-Host "Compiling entry file: $($mainPy.FullName)"
-            # مینوئلی فورس کرنا کہ فائل سیدھی اسی مستقل فولڈر میں جائے
             pyinstaller --onefile --windowed --clean --distpath "$outPath" "$($mainPy.FullName)"
         } else {
-            Write-Error "CRITICAL: No Python file found inside the archive structure!"
+            Write-Error "CRITICAL: No Python file found!"
             exit 1
         }
 
@@ -146,10 +140,10 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Install Unrar & Archive Tools
+    - name: Install Unrar & System Tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y unrar unzip wget curl
+        sudo apt-get install -y unrar unzip wget curl build-essential libltdl-dev libffi-dev libssl-dev python3-dev
 
     - name: Extract Archive (ZIP or RAR) on Linux
       run: |
@@ -172,57 +166,54 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: Install Android Build Dependencies
+    - name: Install Buildozer Dependencies
       run: |
-        sudo apt-get install -y git zip openjdk-17-jdk python3-pip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev libsqlite3-dev tk-dev libgdbm-compat-dev liblzma-dev lzma
+        pip3 install --user --upgrade pip
         pip3 install --user --upgrade buildozer Cython virtualenv
 
-    # لینوکس کے گلوبل ہوم پاتھ پر ٹولز کو فکس کرنا تاکہ کسی بھی فولڈر میں بلڈوزر ایرر نہ دے
-    - name: Fix Global Android SDK (sdkmanager Setup)
+    - name: Perfect Android SDK Injection (License Fix)
       run: |
-        # گلوبل انوائرمنٹ بنانا
         export ANDROID_HOME=$HOME/android-sdk
         mkdir -p $ANDROID_HOME/cmdline-tools
-        cd $ANDROID_HOME/cmdline-tools
-        wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline.zip
-        unzip -q cmdline.zip
-        mv cmdline-tools latest
+        
+        # لیٹسٹ اور پرفیکٹ گوگل ٹولز ڈاؤن لوڈ کرنا
+        wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdline.zip
+        unzip -q cmdline.zip -d $ANDROID_HOME/cmdline-tools
+        mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
         rm cmdline.zip
         
-        # پرانے بلڈوزر پاتھس کے لیے بیک اپ لنکس تیار کرنا
-        mkdir -p $ANDROID_HOME/tools/bin
-        ln -s $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager $ANDROID_HOME/tools/bin/sdkmanager
-        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+        export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+        
+        # تمام لائسنسز کو زبردستی Accept کرنا
+        yes | sdkmanager --licenses
+        # Buildozer کے کریش ہونے سے بچنے کے لیے ضروری ٹولز پہلے سے انسٹال کر دینا
+        yes | sdkmanager "build-tools;34.0.0" "platforms;android-34" "platform-tools"
 
-    - name: Deep Locate and Compile to APK
+    - name: Deep Locate and Compile APK
       run: |
         PROJ="${{ matrix.project }}"
         TARGET_DIR=$(find "projects/${PROJ}_extracted" -name "*.py" -print -quit | xargs dirname)
         
-        if [ -z "$TARGET_DIR" ]; then
-          echo "No python files found for APK build."
-          exit 1
-        fi
-        
+        if [ -z "$TARGET_DIR" ]; then exit 1; fi
         cd "$TARGET_DIR"
         
-        # بلڈوزر کو مینوئلی مجبور کرنا کہ وہ ہمارے کنفیگرڈ گلوبل اینڈرائیڈ ایس ڈی کے پاتھ کو ہی استعمال کرے
-        if [ ! -f buildozer.spec ]; then
-          ~/.local/bin/buildozer init
-          sed -i 's/package.name = myapp/package.name = universalapp/g' buildozer.spec
-          # اینڈرائیڈ ہوم پاتھ کو فائل کے اندر فورس کرنا
-          sed -i "s|# android.sdk_path = /path/to/android/sdk|android.sdk_path = $HOME/android-sdk|g" buildozer.spec
-        else
-          # اگر پہلے سے فائل موجود ہے تو بھی اس کا پاتھ بدل دو
-          sed -i "s|# android.sdk_path = .*|android.sdk_path = $HOME/android-sdk|g" buildozer.spec
-        fi
+        ~/.local/bin/buildozer init || true
         
-        # بلڈ رن کرنا
-        ~/.local/bin/buildozer -v android debug
+        # Buildozer کو مجبور کرنا کہ وہ ہمارا بنایا ہوا 100% پرفیکٹ SDK استعمال کرے
+        echo "android.accept_sdk_license = True" >> buildozer.spec
+        echo "android.sdk_path = $HOME/android-sdk" >> buildozer.spec
+        echo "android.api = 34" >> buildozer.spec
+        echo "p4a.branch = master" >> buildozer.spec
         
-        # فائنل آؤٹ پٹ کو 'compile' فولڈر میں فکس کرنا
+        export ANDROID_HOME=$HOME/android-sdk
+        export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+        
+        # فائنل بلڈ رن
+        yes | ~/.local/bin/buildozer -v android debug
+        
+        # فائنل آؤٹ پٹ کو گارنٹی کے ساتھ 'compile' فولڈر میں ڈالنا
         mkdir -p $GITHUB_WORKSPACE/compile
-        cp bin/*.apk $GITHUB_WORKSPACE/compile/ 2>/dev/null || true
+        find bin/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/compile/ \;
 
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
