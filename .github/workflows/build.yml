@@ -1,4 +1,4 @@
-name: Universal Multi-Project EXE & APK Compiler
+name: ZIP-Based Multi-Project EXE & APK Compiler
 
 on:
   push:
@@ -8,85 +8,97 @@ on:
   workflow_dispatch:
 
 jobs:
-  # سٹیپ 1: یہ جاب چیک کرے گی کہ کس پروجیکٹ کے فولڈر میں تبدیلی آئی ہے
-  detect-changes:
+  # سٹیپ 1: تبدیل شدہ یا نئی زپ فائلز کو ڈیٹیکٹ کرنا
+  detect-zip-changes:
     runs-on: ubuntu-latest
     outputs:
-      changed_projects: ${{ steps.set-matrix.outputs.matrix }}
+      changed_zips: ${{ steps.set-matrix.outputs.matrix }}
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
       with:
-        fetch-depth: 2 # پچھلی پش سے موازنہ کرنے کے لیے ضروری ہے
+        fetch-depth: 2
 
-    - name: Get Changed Folders
+    - name: Get Changed ZIP Files
       id: set-matrix
       run: |
-        # یہ کمانڈ 'projects/' فولڈر کے اندر تبدیل ہونے والے سب فولڈرز کے نام نکالتی ہے
-        CHANGED=$(git diff --name-only HEAD^ HEAD | grep '^projects/' | cut -d/ -f2 | sort -u | jq -R . | jq -s -c .)
+        # یہ کمانڈ projects/ فولڈر میں صرف تبدیل یا اپلوڈ ہونے والی .zip فائلز کے نام نکالتی ہے
+        CHANGED=$(git diff --name-only HEAD^ HEAD | grep '^projects/.*\.zip$' | cut -d/ -f2 | sed 's/\.zip$//' | sort -u | jq -R . | jq -s -c .)
         if [ "$CHANGED" == "[]" ] || [ -z "$CHANGED" ]; then
-          echo "No project changes detected."
+          echo "No new or updated ZIP projects detected."
           echo "matrix=[]" >> $GITHUB_OUTPUT
         else
-          echo "Changed projects: $CHANGED"
+          echo "Changed ZIP projects: $CHANGED"
           echo "matrix=$CHANGED" >> $GITHUB_OUTPUT
         fi
 
-  # سٹیپ 2: یہ جاب صرف تبدیل شدہ پروجیکٹس کے لیے ونڈوز (EXE) بلڈ کرے گی
+  # سٹیپ 2: ونڈوز (EXE) بلڈ جاب
   build-windows-exe:
-    needs: detect-changes
-    if: ${{ needs.detect-changes.outputs.changed_projects != '[]' && needs.detect-changes.outputs.changed_projects != '' }}
+    needs: detect-zip-changes
+    if: ${{ needs.detect-zip-changes.outputs.changed_zips != '[]' && needs.detect-zip-changes.outputs.changed_zips != '' }}
     runs-on: windows-latest
     strategy:
       matrix:
-        project: ${{ fromJson(needs.detect-changes.outputs.changed_projects) }}
+        project: ${{ fromJson(needs.detect-zip-changes.outputs.changed_zips) }}
       fail-fast: false
 
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
+
+    # زپ فائل کو عارضی فولڈر میں ایکسٹریکٹ (Unzip) کرنا
+    - name: Unzip Project Files
+      shell: powershell
+      run: |
+        New-Item -ItemType Directory -Force -Path "projects/${{ matrix.project }}_extracted"
+        Expand-Archive -Path "projects/${{ matrix.project }}.zip" -DestinationPath "projects/${{ matrix.project }}_extracted" -Force
 
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        cache: 'pip'
-        cache-dependency-path: 'projects/${{ matrix.project }}/requirements.txt'
 
-    - name: Install PyInstaller & Project Dependencies
+    - name: Install PyInstaller & Dependencies
+      shell: powershell
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller==6.9.0
-        if (Test-Path "projects/${{ matrix.project }}/requirements.txt") {
-          pip install -r projects/${{ matrix.project }}/requirements.txt
+        if (Test-Path "projects/${{ matrix.project }}_extracted/requirements.txt") {
+          pip install -r "projects/${{ matrix.project }}_extracted/requirements.txt"
         }
 
-    # پروجیکٹ کے اپنے فولڈر کے اندر ہی 'build_artifacts' میں کمپائل کرے گا
+    # پروجیکٹ کے لیے ایگزیکیو فائل بنانا
     - name: Compile to EXE (Windows)
+      shell: powershell
       run: |
-        pyinstaller --onefile --windowed --distpath "./projects/${{ matrix.project }}/build_artifacts" "projects/${{ matrix.project }}/src/main.py"
+        pyinstaller --onefile --windowed --distpath "./projects/build_outputs/${{ matrix.project }}" "projects/${{ matrix.project }}_extracted/src/main.py"
 
     - name: Upload EXE Artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.project }}-windows-exe
-        path: projects/${{ matrix.project }}/build_artifacts/
+        path: ./projects/build_outputs/${{ matrix.project }}/
 
-  # سٹیپ 3: یہ جاب صرف تبدیل شدہ پروجیکٹس کے لیے اینڈرائیڈ (APK) بلڈ کرے گی
+  # سٹیپ 3: اینڈرائیڈ (APK) بلڈ جاب
   build-android-apk:
-    needs: detect-changes
-    if: ${{ needs.detect-changes.outputs.changed_projects != '[]' && needs.detect-changes.outputs.changed_projects != '' }}
+    needs: detect-zip-changes
+    if: ${{ needs.detect-zip-changes.outputs.changed_zips != '[]' && needs.detect-zip-changes.outputs.changed_zips != '' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        project: ${{ fromJson(needs.detect-changes.outputs.changed_projects) }}
+        project: ${{ fromJson(needs.detect-zip-changes.outputs.changed_zips) }}
       fail-fast: false
 
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    # اینڈرائیڈ بلڈ (Buildozer) کے لیے جاوا اور ضروری ٹولز
+    # لینوکس پر زپ فائل کو ان زپ کرنا
+    - name: Unzip Project Files
+      run: |
+        mkdir -p "projects/${{ matrix.project }}_extracted"
+        unzip -o "projects/${{ matrix.project }}.zip" -d "projects/${{ matrix.project }}_extracted"
+
     - name: Set up JDK
       uses: actions/setup-java@v4
       with:
@@ -98,32 +110,27 @@ jobs:
       with:
         python-version: '3.11'
 
-    # اینڈرائیڈ پیکیجنگ (Kivy/Buildozer) کے لیے انوائرمنٹ سیٹ اپ
     - name: Install Android Build Dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev libsqlite3-dev tk-dev libgdbm-compat-dev liblzma-dev lzma
         pip3 install --user --upgrade buildozer Cython virtualenv
 
-    # اگر آپ کا پروجیکٹ Kivy یا Flet پر مبنی ہے تو یہ اسے APK میں کمپائل کرے گا
-    # نوٹ: بلڈوزر کو رن کرنے کے لیے پروجیکٹ فولڈر میں buildozer.spec ہونا ضروری ہے، ورنہ یہ سٹیپ سکپ کر سکتے ہیں
     - name: Compile to APK (Android)
       run: |
-        cd projects/${{ matrix.project }}
+        cd "projects/${{ matrix.project }}_extracted"
         if [ ! -f buildozer.spec ]; then
-          echo "[INFO] No buildozer.spec found, generating default config..."
+          echo "[INFO] Generating default buildozer config..."
           ~/.local/bin/buildozer init
-          # یہاں ہم عارضی طور پر مینوئل انٹرفیس سیٹ اپ ڈائریکٹلی انٹیگریٹ کر سکتے ہیں
         fi
-        # فائنل بلڈ کمانڈ (یہ کچھ وقت لیتی ہے)
         ~/.local/bin/buildozer -v android debug
         
-        # تیار شدہ APK کو پروجیکٹ کے بلڈ فولڈر میں منتقل کرنا
-        mkdir -p build_artifacts
-        cp bin/*.apk build_artifacts/ 2>/dev/null || true
+        # تیار شدہ APK کو آؤٹ پٹ فولڈر میں منتقل کرنا
+        mkdir -p ../build_outputs/${{ matrix.project }}
+        cp bin/*.apk ../build_outputs/${{ matrix.project }}/ 2>/dev/null || true
 
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.project }}-android-apk
-        path: projects/${{ matrix.project }}/build_artifacts/
+        path: ./projects/build_outputs/${{ matrix.project }}/
