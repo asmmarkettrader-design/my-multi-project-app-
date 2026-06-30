@@ -8,12 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       force_project_name:
-        description: 'اگر مینوئلی بلڈ کرنا ہے تو زپ فائل کا نام لکھیں (بغیر .zip کے)'
+        description: 'زپ فائل کا نام لکھیں (بغیر .zip کے)'
         required: false
         default: ''
 
 jobs:
-  # سٹیپ 1: تبدیل شدہ یا نئی زپ فائلز کو ڈیٹیکٹ کرنا
   detect-zip-changes:
     runs-on: ubuntu-latest
     outputs:
@@ -22,17 +21,14 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0 # تمام ہسٹری لے کر ائے گا تاکہ موازنہ خراب نہ ہو
+        fetch-depth: 0
 
     - name: Get Changed ZIP Files
       id: set-matrix
       run: |
-        # اگر صارف نے مینوئلی نام ٹائپ کیا ہے
         if [ "${{ github.event.inputs.force_project_name }}" != "" ]; then
-          echo "Manual trigger for project: ${{ github.event.inputs.force_project_name }}"
           echo "matrix=[\"${{ github.event.inputs.force_project_name }}\"]" >> $GITHUB_OUTPUT
         else
-          # پش پر تبدیلیاں چیک کرنا (اگر پہلی کمٹ ہو تو یہ پوری ہسٹری چیک کرے گا)
           if git rev-parse HEAD~1 >/dev/null 2>&1; then
             CHANGED=$(git diff --name-only HEAD~1 HEAD | grep '^projects/.*\.zip$' | cut -d/ -f2 | sed 's/\.zip$//' | sort -u | jq -R . | jq -s -c .)
           else
@@ -40,15 +36,12 @@ jobs:
           fi
           
           if [ "$CHANGED" == "[]" ] || [ -z "$CHANGED" ]; then
-            echo "No new or updated ZIP projects detected."
             echo "matrix=[]" >> $GITHUB_OUTPUT
           else
-            echo "Changed ZIP projects: $CHANGED"
             echo "matrix=$CHANGED" >> $GITHUB_OUTPUT
           fi
         fi
 
-  # سٹیپ 2: ونڈوز (EXE) بلڈ جاب
   build-windows-exe:
     needs: detect-zip-changes
     if: ${{ needs.detect-zip-changes.outputs.changed_zips != '[]' && needs.detect-zip-changes.outputs.changed_zips != '' }}
@@ -62,15 +55,28 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
+    - name: Fix Windows Output Encoding
+      shell: powershell
+      run: |
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        [Console]::InputEncoding = [System.Text.Encoding]::UTF8
+
     - name: Unzip Project Files
       shell: powershell
       run: |
-        if (Test-Path "projects/${{ matrix.project }}.zip") {
-          New-Item -ItemType Directory -Force -Path "projects/${{ matrix.project }}_extracted"
-          Expand-Archive -Path "projects/${{ matrix.project }}.zip" -DestinationPath "projects/${{ matrix.project }}_extracted" -Force
+        $projName = @"
+        ${{ matrix.project }}
+        "@.Trim()
+        
+        $zipPath = "projects/$projName.zip"
+        $extractPath = "projects/${projName}_extracted"
+        
+        if (Test-Path $zipPath) {
+            New-Item -ItemType Directory -Force -Path $extractPath
+            Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
         } else {
-          Write-Error "ZIP file projects/${{ matrix.project }}.zip not found!"
-          exit 1
+            Write-Error "ZIP file $zipPath not found!"
+            exit 1
         }
 
     - name: Set up Python
@@ -81,30 +87,51 @@ jobs:
     - name: Install PyInstaller & Dependencies
       shell: powershell
       run: |
+        $projName = @"
+        ${{ matrix.project }}
+        "@.Trim()
         python -m pip install --upgrade pip
         pip install pyinstaller==6.9.0
-        if (Test-Path "projects/${{ matrix.project }}_extracted/requirements.txt") {
-          pip install -r "projects/${{ matrix.project }}_extracted/requirements.txt"
+        
+        # پورے ایکسٹریکٹڈ فولڈر میں جہاں بھی requirements.txt ملے اسے انسٹال کرو
+        $reqFile = Get-ChildItem -Path "projects/${projName}_extracted" -Filter "requirements.txt" -Recurse | Select-Object -First 1
+        if ($reqFile) {
+            Write-Host "Installing dependencies from: $($reqFile.FullName)"
+            pip install -r $reqFile.FullName
         }
 
     - name: Compile to EXE (Windows)
       shell: powershell
       run: |
-        # چیک کرنا کہ سورس فائل موجود ہے یا نہیں
-        if (Test-Path "projects/${{ matrix.project }}_extracted/src/main.py") {
-          pyinstaller --onefile --windowed --distpath "./projects/build_outputs/${{ matrix.project }}" "projects/${{ matrix.project }}_extracted/src/main.py"
+        $projName = @"
+        ${{ matrix.project }}
+        "@.Trim()
+        $extractPath = "projects/${projName}_extracted"
+        $outPath = "./projects/build_outputs/$projName"
+        
+        # جادوئی سٹیپ: یہ فولڈر کے اندر سب سے پہلی مین .py فائل خود تلاش کرے گا
+        # ترجیح 1: اگر کہیں بھی main.py نام کی فائل ہے
+        $mainPy = Get-ChildItem -Path $extractPath -Filter "main.py" -Recurse | Select-Object -First 1
+        
+        # ترجیح 2: اگر main.py نہیں ہے تو فولڈر کی کوئی بھی پہلی .py فائل اٹھا لو
+        if (-not $mainPy) {
+            $mainPy = Get-ChildItem -Path $extractPath -Filter "*.py" -Recurse | Select-Object -First 1
+        }
+        
+        if ($mainPy) {
+            Write-Host "Found entry point Python file at: $($mainPy.FullName)"
+            pyinstaller --onefile --windowed --distpath $outPath $mainPy.FullName
         } else {
-          # اگر زپ کے اندر ڈائریکٹ main.py پڑی ہو بغیر src کے
-          pyinstaller --onefile --windowed --distpath "./projects/build_outputs/${{ matrix.project }}" "projects/${{ matrix.project }}_extracted/main.py"
+            Write-Error "No Python (.py) script found anywhere inside the extracted ZIP file!"
+            exit 1
         }
 
     - name: Upload EXE Artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.project }}-windows-exe
-        path: ./projects/build_outputs/${{ matrix.project }}/
+        path: ./projects/build_outputs/
 
-  # سٹیپ 3: اینڈرائیڈ (APK) بلڈ جاب
   build-android-apk:
     needs: detect-zip-changes
     if: ${{ needs.detect-zip-changes.outputs.changed_zips != '[]' && needs.detect-zip-changes.outputs.changed_zips != '' }}
@@ -143,16 +170,20 @@ jobs:
     - name: Compile to APK (Android)
       run: |
         cd "projects/${{ matrix.project }}_extracted"
+        # اگر زپ کے اندر ایک اور فولڈر ہے تو اس کے اندر منتقل ہو جاؤ
+        if [ -d "${{ matrix.project }}" ]; then
+          cd "${{ matrix.project }}"
+        fi
+        
         if [ ! -f buildozer.spec ]; then
           ~/.local/bin/buildozer init
         fi
         ~/.local/bin/buildozer -v android debug
-        
-        mkdir -p ../build_outputs/${{ matrix.project }}
-        cp bin/*.apk ../build_outputs/${{ matrix.project }}/ 2>/dev/null || true
+        mkdir -p ../../build_outputs/"${{ matrix.project }}"
+        cp bin/*.apk ../../build_outputs/"${{ matrix.project }}"/ 2>/dev/null || true
 
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.project }}-android-apk
-        path: ./projects/build_outputs/${{ matrix.project }}/
+        path: ./projects/build_outputs/
