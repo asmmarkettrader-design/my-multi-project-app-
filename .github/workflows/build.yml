@@ -1,4 +1,4 @@
-name: Ultimate ZIP & RAR Multi-Project Compiler
+name: Ultimate Multi-Project EXE & APK Compiler
 
 on:
   push:
@@ -8,40 +8,42 @@ on:
   workflow_dispatch:
     inputs:
       force_project_name:
-        description: 'اگر مینوئلی رن کرنا ہے تو فائل کا نام لکھیں (بغیر .zip یا .rar کے)'
+        description: 'Manual Project Name (Without .zip or .rar)'
         required: false
         default: ''
 
 jobs:
+  # STEP 1: Detect Changed Projects or Handle Manual Trigger
   detect-archives:
     runs-on: ubuntu-latest
     outputs:
       changed_archives: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    - name: Get Changed ZIP or RAR Files
-      id: set-matrix
-      run: |
-        if [ "${{ github.event.inputs.force_project_name }}" != "" ]; then
-          echo "matrix=[\"${{ github.event.inputs.force_project_name }}\"]" >> $GITHUB_OUTPUT
-        else
-          if git rev-parse HEAD~1 >/dev/null 2>&1; then
-            CHANGED=$(git diff --name-only HEAD~1 HEAD | grep -E '^projects/.*\.(zip|rar)$' | cut -d/ -f2 | sed -E 's/\.(zip|rar)$//' | sort -u | jq -R . | jq -s -c .)
+      - name: Get Changed ZIP or RAR Files
+        id: set-matrix
+        run: |
+          if [ "${{ github.event.inputs.force_project_name }}" != "" ]; then
+            echo "matrix=[\"${{ github.event.inputs.force_project_name }}\"]" >> $GITHUB_OUTPUT
           else
-            CHANGED=$(git ls-files projects/ | grep -E '\.(zip|rar)$' | cut -d/ -f2 | sed -E 's/\.(zip|rar)$//' | sort -u | jq -R . | jq -s -c .)
+            if git rev-parse HEAD~1 >/dev/null 2>&1; then
+              CHANGED=$(git diff --name-only HEAD~1 HEAD | grep -E '^projects/.*\.(zip|rar)$' | cut -d/ -f2 | sed -E 's/\.(zip|rar)$//' | sort -u | jq -R . | jq -s -c .)
+            else
+              CHANGED=$(git ls-files projects/ | grep -E '\.(zip|rar)$' | cut -d/ -f2 | sed -E 's/\.(zip|rar)$//' | sort -u | jq -R . | jq -s -c .)
+            fi
+            
+            if [ "$CHANGED" == "[]" ] || [ -z "$CHANGED" ]; then
+              echo "matrix=[]" >> $GITHUB_OUTPUT
+            else
+              echo "matrix=$CHANGED" >> $GITHUB_OUTPUT
+            fi
           fi
-          
-          if [ "$CHANGED" == "[]" ] || [ -z "$CHANGED" ]; then
-            echo "matrix=[]" >> $GITHUB_OUTPUT
-          else
-            echo "matrix=$CHANGED" >> $GITHUB_OUTPUT
-          fi
-        fi
 
+  # STEP 2: Windows Standalone EXE Compiler
   build-windows-exe:
     needs: detect-archives
     if: ${{ needs.detect-archives.outputs.changed_archives != '[]' && needs.detect-archives.outputs.changed_archives != '' }}
@@ -50,83 +52,80 @@ jobs:
       matrix:
         project: ${{ fromJson(needs.detect-archives.outputs.changed_archives) }}
       fail-fast: false
-
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Fix Output Encoding
-      shell: powershell
-      run: |
-        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-        [Console]::InputEncoding = [System.Text.Encoding]::UTF8
+      - name: Fix Output Encoding
+        shell: powershell
+        run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 
-    - name: Extract Archive (ZIP or RAR)
-      shell: powershell
-      run: |
-        $proj = "${{ matrix.project }}".Trim()
-        $extractPath = "projects/${proj}_extracted"
-        New-Item -ItemType Directory -Force -Path $extractPath
-        
-        $zipFile = "projects/$proj.zip"
-        $rarFile = "projects/$proj.rar"
-        
-        if (Test-Path $zipFile) {
-            Expand-Archive -Path $zipFile -DestinationPath $extractPath -Force
-        } elseif (Test-Path $rarFile) {
-            & 7z x $rarFile "-o$extractPath" -y
-        } else {
-            Write-Error "No archive found for $proj"
-            exit 1
-        }
+      - name: Extract Archive (ZIP or RAR)
+        shell: powershell
+        run: |
+          $proj = "${{ matrix.project }}".Trim()
+          $extractPath = "projects/${proj}_extracted"
+          New-Item -ItemType Directory -Force -Path $extractPath
+          $zipFile = "projects/$proj.zip"
+          $rarFile = "projects/$proj.rar"
+          if (Test-Path $zipFile) {
+              Expand-Archive -Path $zipFile -DestinationPath $extractPath -Force
+          } elseif (Test-Path $rarFile) {
+              & 7z x $rarFile "-o$extractPath" -y
+          } else {
+              Write-Error "No archive found for $proj"
+              exit 1
+          }
 
-    - name: Set up Python (32-bit for Universal Compatibility)
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-        architecture: 'x86'
+      - name: Set up Python (Universal 32-bit Compatibility)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          architecture: 'x86'
 
-    - name: Deep Scan & Install Dependencies
-      shell: powershell
-      run: |
-        $proj = "${{ matrix.project }}".Trim()
-        python -m pip install --upgrade pip
-        pip install pyinstaller==6.9.0
-        
-        $reqs = Get-ChildItem -Path "projects/${proj}_extracted" -Filter "requirements.txt" -Recurse
-        foreach ($req in $reqs) {
-            Write-Host "Installing dependencies from: $($req.FullName)"
-            (Get-Content $req.FullName) -replace 'sqlite3-utils', 'sqlite-utils' | Set-Content $req.FullName
-            pip install -r $req.FullName
-        }
+      - name: Deep Scan & Install Dependencies
+        shell: powershell
+        run: |
+          $proj = "${{ matrix.project }}".Trim()
+          python -m pip install --upgrade pip
+          pip install pyinstaller==6.9.0
+          $reqs = Get-ChildItem -Path "projects/${proj}_extracted" -Filter "requirements.txt" -Recurse
+          foreach ($req in $reqs) {
+              Write-Host "Installing dependencies from found file: $($req.FullName)"
+              (Get-Content $req.FullName) -replace 'sqlite3-utils', 'sqlite-utils' | Set-Content $req.FullName
+              pip install -r $req.FullName
+          }
 
-    - name: Deep Scan & Compile to EXE
-      shell: powershell
-      run: |
-        $proj = "${{ matrix.project }}".Trim()
-        $extractPath = "projects/${proj}_extracted"
-        
-        # 100% گارنٹی کے ساتھ 'compile' فولڈر بنانا
-        $outPath = Join-Path -Path $env:GITHUB_WORKSPACE -ChildPath "compile"
-        if (-not (Test-Path $outPath)) { New-Item -ItemType Directory -Force -Path $outPath }
-        
-        $mainPy = Get-ChildItem -Path $extractPath -Filter "main.py" -Recurse | Select-Object -First 1
-        if (-not $mainPy) { $mainPy = Get-ChildItem -Path $extractPath -Filter "*.py" -Recurse | Select-Object -First 1 }
-        
-        if ($mainPy) {
-            pyinstaller --onefile --windowed --clean --distpath "$outPath" "$($mainPy.FullName)"
-        } else {
-            Write-Error "CRITICAL: No Python file found!"
-            exit 1
-        }
+      - name: Deep Scan & Compile to EXE
+        shell: powershell
+        run: |
+          $proj = "${{ matrix.project }}".Trim()
+          $extractPath = "projects/${proj}_extracted"
+          $outPath = "${{ github.workspace }}\compile"
+          if (-not (Test-Path $outPath)) {
+              New-Item -ItemType Directory -Force -Path $outPath
+          }
+          $mainPy = Get-ChildItem -Path $extractPath -Filter "main.py" -Recurse | Select-Object -First 1
+          if (-not $mainPy) {
+              $mainPy = Get-ChildItem -Path $extractPath -Filter "*.py" -Recurse | Select-Object -First 1
+          }
+          if ($mainPy) {
+              pyinstaller --onefile --windowed --clean --exclude-module tkinter --exclude-module numpy --exclude-module matplotlib --distpath "$outPath" "$($mainPy.FullName)"
+          } else {
+              Write-Error "CRITICAL: No Python file found inside the archive structure!"
+              exit 1
+          }
 
-    - name: Upload EXE Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ matrix.project }}-windows-exe
-        path: compile/
-        if-no-files-found: error
+      - name: Upload EXE Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.project }}-windows-exe
+          path: compile/
+          if-no-files-found: error
 
+  # STEP 3: Android APK Compiler with Automated License Injection
   build-android-apk:
     needs: detect-archives
     if: ${{ needs.detect-archives.outputs.changed_archives != '[]' && needs.detect-archives.outputs.changed_archives != '' }}
@@ -135,89 +134,86 @@ jobs:
       matrix:
         project: ${{ fromJson(needs.detect-archives.outputs.changed_archives) }}
       fail-fast: false
-
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Install Unrar & System Tools
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y unrar unzip wget curl build-essential libltdl-dev libffi-dev libssl-dev python3-dev
+      - name: Install Archive Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unrar unzip wget curl
 
-    - name: Extract Archive (ZIP or RAR) on Linux
-      run: |
-        PROJ="${{ matrix.project }}"
-        mkdir -p "projects/${PROJ}_extracted"
-        if [ -f "projects/${PROJ}.zip" ]; then
-          unzip -o "projects/${PROJ}.zip" -d "projects/${PROJ}_extracted"
-        elif [ -f "projects/${PROJ}.rar" ]; then
-          unrar x -o+ "projects/${PROJ}.rar" "projects/${PROJ}_extracted/"
-        fi
+      - name: Extract Archive (ZIP or RAR) on Linux
+        run: |
+          PROJ="${{ matrix.project }}"
+          mkdir -p "projects/${PROJ}_extracted"
+          if [ -f "projects/${PROJ}.zip" ]; then
+            unzip -o "projects/${PROJ}.zip" -d "projects/${PROJ}_extracted"
+          elif [ -f "projects/${PROJ}.rar" ]; then
+            unrar x -o+ "projects/${PROJ}.rar" "projects/${PROJ}_extracted/"
+          fi
 
-    - name: Set up JDK
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'temurin'
-        java-version: '17'
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-    - name: Install Buildozer Dependencies
-      run: |
-        pip3 install --user --upgrade pip
-        pip3 install --user --upgrade buildozer Cython virtualenv
+      - name: Install Android Build Dependencies
+        run: |
+          sudo apt-get install -y git zip openjdk-17-jdk python3-pip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev libsqlite3-dev tk-dev libgdbm-compat-dev liblzma-dev lzma
+          pip3 install --user --upgrade buildozer Cython virtualenv
 
-    - name: Perfect Android SDK Injection (License Fix)
-      run: |
-        export ANDROID_HOME=$HOME/android-sdk
-        mkdir -p $ANDROID_HOME/cmdline-tools
-        
-        # لیٹسٹ اور پرفیکٹ گوگل ٹولز ڈاؤن لوڈ کرنا
-        wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdline.zip
-        unzip -q cmdline.zip -d $ANDROID_HOME/cmdline-tools
-        mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
-        rm cmdline.zip
-        
-        export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
-        
-        # تمام لائسنسز کو زبردستی Accept کرنا
-        yes | sdkmanager --licenses
-        # Buildozer کے کریش ہونے سے بچنے کے لیے ضروری ٹولز پہلے سے انسٹال کر دینا
-        yes | sdkmanager "build-tools;34.0.0" "platforms;android-34" "platform-tools"
+      - name: Setup Global Android Tools & Licenses
+        run: |
+          export ANDROID_HOME=$HOME/android-sdk
+          mkdir -p $ANDROID_HOME/cmdline-tools
+          cd $ANDROID_HOME/cmdline-tools
+          wget https://google.com -O cmdline.zip
+          unzip -q cmdline.zip
+          mv cmdline-tools latest
+          rm cmdline.zip
+          
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          
+          mkdir -p $HOME/.buildozer/android/platform/android-sdk/licenses
+          cp -r $ANDROID_HOME/licenses/* $HOME/.buildozer/android/platform/android-sdk/licenses/ 2>/dev/null || true
 
-    - name: Deep Locate and Compile APK
-      run: |
-        PROJ="${{ matrix.project }}"
-        TARGET_DIR=$(find "projects/${PROJ}_extracted" -name "*.py" -print -quit | xargs dirname)
-        
-        if [ -z "$TARGET_DIR" ]; then exit 1; fi
-        cd "$TARGET_DIR"
-        
-        ~/.local/bin/buildozer init || true
-        
-        # Buildozer کو مجبور کرنا کہ وہ ہمارا بنایا ہوا 100% پرفیکٹ SDK استعمال کرے
-        echo "android.accept_sdk_license = True" >> buildozer.spec
-        echo "android.sdk_path = $HOME/android-sdk" >> buildozer.spec
-        echo "android.api = 34" >> buildozer.spec
-        echo "p4a.branch = master" >> buildozer.spec
-        
-        export ANDROID_HOME=$HOME/android-sdk
-        export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
-        
-        # فائنل بلڈ رن
-        yes | ~/.local/bin/buildozer -v android debug
-        
-        # فائنل آؤٹ پٹ کو گارنٹی کے ساتھ 'compile' فولڈر میں ڈالنا
-        mkdir -p $GITHUB_WORKSPACE/compile
-        find bin/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/compile/ \;
+      - name: Deep Locate and Compile to APK
+        run: |
+          PROJ="${{ matrix.project }}"
+          TARGET_DIR=$(find "projects/${PROJ}_extracted" -name "*.py" -print -quit | xargs dirname)
+          if [ -z "$TARGET_DIR" ]; then
+            echo "No python files found for APK build."
+            exit 1
+          fi
+          cd "$TARGET_DIR"
+          
+          if [ ! -f buildozer.spec ]; then
+            ~/.local/bin/buildozer init
+            sed -i 's/package.name = myapp/package.name = universalapp/g' buildozer.spec
+          fi
+          
+          sed -i "s|# android.sdk_path = /path/to/android/sdk|android.sdk_path = $HOME/android-sdk|g" buildozer.spec
+          sed -i "s|# android.accept_apk_license = False|android.accept_apk_license = True|g" buildozer.spec
+          
+          export ANDROID_HOME=$HOME/android-sdk
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          
+          yes | ~/.local/bin/buildozer -v android debug || true
+          
+          mkdir -p $GITHUB_WORKSPACE/compile
+          find bin/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/compile/ \; 2>/dev/null || true
 
-    - name: Upload APK Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ matrix.project }}-android-apk
-        path: compile/
-        if-no-files-found: error
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.project }}-android-apk
+          path: compile/
+          if-no-files-found: error
