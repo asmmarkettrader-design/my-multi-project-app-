@@ -1,83 +1,129 @@
-name: Compile Changed Projects
+name: Universal Multi-Project EXE & APK Compiler
 
 on:
   push:
     branches:
       - main
+      - master
   workflow_dispatch:
 
 jobs:
-  filter-changes:
+  # سٹیپ 1: یہ جاب چیک کرے گی کہ کس پروجیکٹ کے فولڈر میں تبدیلی آئی ہے
+  detect-changes:
     runs-on: ubuntu-latest
     outputs:
-      project_alpha: ${{ steps.changes.outputs.project_alpha }}
-      project_beta: ${{ steps.changes.outputs.project_beta }}
+      changed_projects: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-    - name: Checkout Repository
+    - name: Checkout Code
       uses: actions/checkout@v4
-
-    - name: Detect Changes in Projects
-      uses: dorny/paths-filter@v3
-      id: changes
       with:
-        filters: |
-          project_alpha:
-            - 'projects/project_alpha/**'
-          project_beta:
-            - 'projects/project_beta/**'
+        fetch-depth: 2 # پچھلی پش سے موازنہ کرنے کے لیے ضروری ہے
 
-  build-alpha:
-    needs: filter-changes
-    if: needs.filter-changes.outputs.project_alpha == 'true'
+    - name: Get Changed Folders
+      id: set-matrix
+      run: |
+        # یہ کمانڈ 'projects/' فولڈر کے اندر تبدیل ہونے والے سب فولڈرز کے نام نکالتی ہے
+        CHANGED=$(git diff --name-only HEAD^ HEAD | grep '^projects/' | cut -d/ -f2 | sort -u | jq -R . | jq -s -c .)
+        if [ "$CHANGED" == "[]" ] || [ -z "$CHANGED" ]; then
+          echo "No project changes detected."
+          echo "matrix=[]" >> $GITHUB_OUTPUT
+        else
+          echo "Changed projects: $CHANGED"
+          echo "matrix=$CHANGED" >> $GITHUB_OUTPUT
+        fi
+
+  # سٹیپ 2: یہ جاب صرف تبدیل شدہ پروجیکٹس کے لیے ونڈوز (EXE) بلڈ کرے گی
+  build-windows-exe:
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.changed_projects != '[]' && needs.detect-changes.outputs.changed_projects != '' }}
     runs-on: windows-latest
+    strategy:
+      matrix:
+        project: ${{ fromJson(needs.detect-changes.outputs.changed_projects) }}
+      fail-fast: false
+
     steps:
-    - name: Checkout Repository
+    - name: Checkout Code
       uses: actions/checkout@v4
 
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
+        cache: 'pip'
+        cache-dependency-path: 'projects/${{ matrix.project }}/requirements.txt'
 
-    - name: Install Dependencies
+    - name: Install PyInstaller & Project Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r projects/project_alpha/requirements.txt
+        pip install pyinstaller==6.9.0
+        if (Test-Path "projects/${{ matrix.project }}/requirements.txt") {
+          pip install -r projects/${{ matrix.project }}/requirements.txt
+        }
 
-    - name: Build Executable for Alpha
+    # پروجیکٹ کے اپنے فولڈر کے اندر ہی 'build_artifacts' میں کمپائل کرے گا
+    - name: Compile to EXE (Windows)
       run: |
-        pyinstaller --onefile --distpath ./projects/project_alpha/build_artifacts projects/project_alpha/src/main.py
+        pyinstaller --onefile --windowed --distpath "./projects/${{ matrix.project }}/build_artifacts" "projects/${{ matrix.project }}/src/main.py"
 
-    - name: Upload Alpha Artifact
+    - name: Upload EXE Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: alpha-executable
-        path: ./projects/project_alpha/build_artifacts/
+        name: ${{ matrix.project }}-windows-exe
+        path: projects/${{ matrix.project }}/build_artifacts/
 
-  build-beta:
-    needs: filter-changes
-    if: needs.filter-changes.outputs.project_beta == 'true'
-    runs-on: windows-latest
+  # سٹیپ 3: یہ جاب صرف تبدیل شدہ پروجیکٹس کے لیے اینڈرائیڈ (APK) بلڈ کرے گی
+  build-android-apk:
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.changed_projects != '[]' && needs.detect-changes.outputs.changed_projects != '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project: ${{ fromJson(needs.detect-changes.outputs.changed_projects) }}
+      fail-fast: false
+
     steps:
-    - name: Checkout Repository
+    - name: Checkout Code
       uses: actions/checkout@v4
+
+    # اینڈرائیڈ بلڈ (Buildozer) کے لیے جاوا اور ضروری ٹولز
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
 
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
 
-    - name: Install Dependencies
+    # اینڈرائیڈ پیکیجنگ (Kivy/Buildozer) کے لیے انوائرمنٹ سیٹ اپ
+    - name: Install Android Build Dependencies
       run: |
-        python -m pip install --upgrade pip
-        pip install -r projects/project_beta/requirements.txt
+        sudo apt-get update
+        sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev libsqlite3-dev tk-dev libgdbm-compat-dev liblzma-dev lzma
+        pip3 install --user --upgrade buildozer Cython virtualenv
 
-    - name: Build Executable for Beta
+    # اگر آپ کا پروجیکٹ Kivy یا Flet پر مبنی ہے تو یہ اسے APK میں کمپائل کرے گا
+    # نوٹ: بلڈوزر کو رن کرنے کے لیے پروجیکٹ فولڈر میں buildozer.spec ہونا ضروری ہے، ورنہ یہ سٹیپ سکپ کر سکتے ہیں
+    - name: Compile to APK (Android)
       run: |
-        pyinstaller --onefile --distpath ./projects/project_beta/build_artifacts projects/project_beta/src/main.py
+        cd projects/${{ matrix.project }}
+        if [ ! -f buildozer.spec ]; then
+          echo "[INFO] No buildozer.spec found, generating default config..."
+          ~/.local/bin/buildozer init
+          # یہاں ہم عارضی طور پر مینوئل انٹرفیس سیٹ اپ ڈائریکٹلی انٹیگریٹ کر سکتے ہیں
+        fi
+        # فائنل بلڈ کمانڈ (یہ کچھ وقت لیتی ہے)
+        ~/.local/bin/buildozer -v android debug
+        
+        # تیار شدہ APK کو پروجیکٹ کے بلڈ فولڈر میں منتقل کرنا
+        mkdir -p build_artifacts
+        cp bin/*.apk build_artifacts/ 2>/dev/null || true
 
-    - name: Upload Beta Artifact
+    - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: beta-executable
-        path: ./projects/project_beta/build_artifacts/
+        name: ${{ matrix.project }}-android-apk
+        path: projects/${{ matrix.project }}/build_artifacts/
