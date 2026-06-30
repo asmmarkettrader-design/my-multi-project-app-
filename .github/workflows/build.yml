@@ -45,7 +45,7 @@ jobs:
   build-windows-exe:
     needs: detect-archives
     if: ${{ needs.detect-archives.outputs.changed_archives != '[]' && needs.detect-archives.outputs.changed_archives != '' }}
-    runs-on: windows-latest
+    runs-on: windows-2019
     strategy:
       matrix:
         project: ${{ fromJson(needs.detect-archives.outputs.changed_archives) }}
@@ -80,10 +80,11 @@ jobs:
             exit 1
         }
 
-    - name: Set up Python
+    - name: Set up Python (32-bit for Universal Compatibility)
       uses: actions/setup-python@v5
       with:
-        python-version: '3.10' # پرانی اور نئی دونوں لائبریریز کی مطابقت کے لیے پائتھون 3.10 پر شفٹ کیا ہے
+        python-version: '3.10'
+        architecture: 'x86'
 
     - name: Deep Scan & Install Dependencies
       shell: powershell
@@ -95,17 +96,21 @@ jobs:
         $reqs = Get-ChildItem -Path "projects/${proj}_extracted" -Filter "requirements.txt" -Recurse
         foreach ($req in $reqs) {
             Write-Host "Installing dependencies from found file: $($req.FullName)"
-            # اگر غلطی سے فرنٹ اینڈ پر غلط نام لکھا ہو تو اسے انسٹالیشن کے دوران ہینڈل کرنا
             (Get-Content $req.FullName) -replace 'sqlite3-utils', 'sqlite-utils' | Set-Content $req.FullName
             pip install -r $req.FullName
         }
 
-    - name: Deep Scan & Compile to EXE
+    - name: Deep Scan & Compile to EXE (Strict Compile Folder Path)
       shell: powershell
       run: |
         $proj = "${{ matrix.project }}".Trim()
         $extractPath = "projects/${proj}_extracted"
-        $outPath = "./projects/build_outputs/$proj"
+        
+        # بالکل روٹ لیول پر ایک مستقل 'compile' فولڈر بنانا
+        $outPath = "$echo $env:GITHUB_WORKSPACE\compile"
+        if (-not (Test-Path $outPath)) {
+            New-Item -ItemType Directory -Force -Path $outPath
+        }
         
         $mainPy = Get-ChildItem -Path $extractPath -Filter "main.py" -Recurse | Select-Object -First 1
         if (-not $mainPy) {
@@ -113,7 +118,9 @@ jobs:
         }
         
         if ($mainPy) {
-            pyinstaller --onefile --windowed --distpath $outPath $mainPy.FullName
+            Write-Host "Compiling entry file: $($mainPy.FullName)"
+            # مینوئلی فورس کرنا کہ فائل سیدھی اسی مستقل فولڈر میں جائے
+            pyinstaller --onefile --windowed --clean --distpath "$outPath" "$($mainPy.FullName)"
         } else {
             Write-Error "CRITICAL: No Python file found inside the archive structure!"
             exit 1
@@ -123,7 +130,8 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.project }}-windows-exe
-        path: ./projects/build_outputs/
+        path: compile/
+        if-no-files-found: error
 
   build-android-apk:
     needs: detect-archives
@@ -138,10 +146,10 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Install Unrar Tool (Linux)
+    - name: Install Unrar & Archive Tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y unrar unzip
+        sudo apt-get install -y unrar unzip wget curl
 
     - name: Extract Archive (ZIP or RAR) on Linux
       run: |
@@ -169,15 +177,22 @@ jobs:
         sudo apt-get install -y git zip openjdk-17-jdk python3-pip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev libsqlite3-dev tk-dev libgdbm-compat-dev liblzma-dev lzma
         pip3 install --user --upgrade buildozer Cython virtualenv
 
-    # جادوئی سٹیپ: بلڈوزر چلنے سے پہلے گوگل اینڈرائیڈ کے تمام لائسنس مینوئلی ایکسیپٹ کرنا
-    - name: Auto-Accept Android SDK Licenses
+    # لینوکس کے گلوبل ہوم پاتھ پر ٹولز کو فکس کرنا تاکہ کسی بھی فولڈر میں بلڈوزر ایرر نہ دے
+    - name: Fix Global Android SDK (sdkmanager Setup)
       run: |
-        mkdir -p ~/.android
-        touch ~/.android/repositories.cfg
-        # بلڈوزر کی ڈیفالٹ لوکیشن بنا کر لائسنس فائلز پہلے سے انجیکٹ کرنا
-        mkdir -p /home/runner/.buildozer/android/platform/android-sdk/licenses
-        echo -e "\n89354db23afb50a819afa2e1ec4d1222733d9014\nd56f171340b0cf14ad45120c7210103861a8ef8d\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > /home/runner/.buildozer/android/platform/android-sdk/licenses/android-sdk-license
-        echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > /home/runner/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license
+        # گلوبل انوائرمنٹ بنانا
+        export ANDROID_HOME=$HOME/android-sdk
+        mkdir -p $ANDROID_HOME/cmdline-tools
+        cd $ANDROID_HOME/cmdline-tools
+        wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline.zip
+        unzip -q cmdline.zip
+        mv cmdline-tools latest
+        rm cmdline.zip
+        
+        # پرانے بلڈوزر پاتھس کے لیے بیک اپ لنکس تیار کرنا
+        mkdir -p $ANDROID_HOME/tools/bin
+        ln -s $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager $ANDROID_HOME/tools/bin/sdkmanager
+        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
     - name: Deep Locate and Compile to APK
       run: |
@@ -191,18 +206,27 @@ jobs:
         
         cd "$TARGET_DIR"
         
+        # بلڈوزر کو مینوئلی مجبور کرنا کہ وہ ہمارے کنفیگرڈ گلوبل اینڈرائیڈ ایس ڈی کے پاتھ کو ہی استعمال کرے
         if [ ! -f buildozer.spec ]; then
           ~/.local/bin/buildozer init
+          sed -i 's/package.name = myapp/package.name = universalapp/g' buildozer.spec
+          # اینڈرائیڈ ہوم پاتھ کو فائل کے اندر فورس کرنا
+          sed -i "s|# android.sdk_path = /path/to/android/sdk|android.sdk_path = $HOME/android-sdk|g" buildozer.spec
+        else
+          # اگر پہلے سے فائل موجود ہے تو بھی اس کا پاتھ بدل دو
+          sed -i "s|# android.sdk_path = .*|android.sdk_path = $HOME/android-sdk|g" buildozer.spec
         fi
         
-        # لائسنس بائی پاس کے ساتھ اینڈرائیڈ بلڈ رن کرنا
-        yes | ~/.local/bin/buildozer -v android debug
+        # بلڈ رن کرنا
+        ~/.local/bin/buildozer -v android debug
         
-        mkdir -p ../../build_outputs/"$PROJ"
-        cp bin/*.apk ../../build_outputs/"$PROJ"/ 2>/dev/null || true
+        # فائنل آؤٹ پٹ کو 'compile' فولڈر میں فکس کرنا
+        mkdir -p $GITHUB_WORKSPACE/compile
+        cp bin/*.apk $GITHUB_WORKSPACE/compile/ 2>/dev/null || true
 
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.project }}-android-apk
-        path: ./projects/build_outputs/
+        path: compile/
+        if-no-files-found: error
